@@ -46,5 +46,4 @@ namespace BPCalculator.Pages
         }
     }
 
-    // REMOVE the duplicate BloodPressure class from here
 }
