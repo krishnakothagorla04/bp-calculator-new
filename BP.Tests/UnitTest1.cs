@@ -1,6 +1,8 @@
 ﻿using Xunit;
 using BPCalculator;
 
+// These are the Test cases and BDD cases 
+
 namespace BPCalculator.Tests
 {
     public class BloodPressureTests
