@@ -70,7 +70,7 @@ jobs:
             --configuration Release \
             /p:CollectCoverage=true \
             /p:CoverletOutput=$(pwd)/coverage/ \
-            /p:CoverletOutputFormat=cobertura \
+            /p:CoverletOutputFormat=opencover \
             /p:Include="[BP.Calculator]*"
 
       - name: Check coverage file
@@ -119,7 +119,7 @@ jobs:
             -Dsonar.projectKey=krishnakothagorla04_bp-calculator-new
             -Dsonar.projectName=bp-calculator-new
             -Dsonar.sources=.
-            -Dsonar.cs.opencover.reportsPaths=$(pwd)/coverage/coverage.cobertura.xml
+            -Dsonar.cs.opencover.reportsPaths=$(pwd)/coverage/coverage.opencover.xml
 
       - name: Pipeline Completion
         run: |
