@@ -118,7 +118,7 @@ jobs:
             -Dsonar.organization=${{ secrets.SONAR_ORG }}
             -Dsonar.projectKey=krishnakothagorla04_bp-calculator-new
             -Dsonar.projectName=bp-calculator-new
-            -Dsonar.sources=BP.Calculator
+            -Dsonar.sources=.
             -Dsonar.cs.opencover.reportsPaths=$(pwd)/coverage/coverage.cobertura.xml
 
       - name: Pipeline Completion
