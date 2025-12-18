@@ -19,23 +19,21 @@ env:
   IMAGE_NAME: ghcr.io/krishnakothagorla04/bp-calculator
   REGISTRY: ghcr.io
 
-  # Canary Traffic Progression: 5% → 25% → 75% → 100%
-  CANARY_PHASE_1: 5    # Initial canary traffic percentage
-  CANARY_PHASE_2: 25   # Second phase traffic percentage
-  CANARY_PHASE_3: 75   # Third phase traffic percentage
+  CANARY_PHASE_1: 5
+  CANARY_PHASE_2: 25
+  CANARY_PHASE_3: 75
 
 permissions:
   contents: read
   issues: write
+  packages: write   # REQUIRED for GHCR push
 
 jobs:
-  # =====================
-  # PHASE 1: CODE BUILD & VALIDATION
-  # =====================
   build-validation:
     runs-on: ubuntu-latest
     outputs:
       docker-tag: ${{ steps.version.outputs.docker-tag }}
+
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -51,8 +49,7 @@ jobs:
           SHORT_SHA=${GITHUB_SHA::8}
           TAG="canary-$(date +%Y%m%d)-${SHORT_SHA}"
           echo "docker-tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Deployment Tag: $TAG"
-      
+
       - name: Restore Dependencies
         run: dotnet restore ./bp-calculator.sln
 
@@ -62,11 +59,6 @@ jobs:
       - name: Execute Test Suite
         run: dotnet test ./BP.Tests/BP.Tests.csproj --configuration Release --no-build --verbosity normal
 
-      - name: Build Docker Container
-        run: |
-          docker build -t $IMAGE_NAME:${{ steps.version.outputs.docker-tag }} .
-          docker build -t $IMAGE_NAME:canary-latest .
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v2
         with:
@@ -74,26 +66,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
 
-      - name: Build Docker Container
+      - name: Build, Tag & Push Docker Image
         run: |
           docker build -t $IMAGE_NAME:${{ steps.version.outputs.docker-tag }} .
-          docker build -t $IMAGE_NAME:canary-latest .
+          docker tag $IMAGE_NAME:${{ steps.version.outputs.docker-tag }} $IMAGE_NAME:canary-latest
+          docker push $IMAGE_NAME:${{ steps.version.outputs.docker-tag }}
+          docker push $IMAGE_NAME:canary-latest
 
-      
       - name: Validate Container Health
         run: |
           docker run -d --name validation-container -p 8080:8080 $IMAGE_NAME:${{ steps.version.outputs.docker-tag }}
           sleep 10
-          echo "Validating container health..."
-          curl -f http://localhost:8080/health || (echo "Health validation failed" && exit 1)
+          curl -f http://localhost:8080/health
           docker stop validation-container
           docker rm validation-container
-          echo " Container validation successful"
-      
+
       - name: Archive Deployment Artifact
         run: |
           docker save $IMAGE_NAME:${{ steps.version.outputs.docker-tag }} > docker-image.tar
-          # Also save the image with a fixed name for easier loading
           docker tag $IMAGE_NAME:${{ steps.version.outputs.docker-tag }} $IMAGE_NAME:latest-canary
           docker save $IMAGE_NAME:latest-canary > docker-image-latest.tar
 
@@ -106,9 +96,6 @@ jobs:
             docker-image-latest.tar
           retention-days: 3
 
-  # =====================
-  # PHASE 2: SECURITY & PERFORMANCE SCANNING
-  # =====================
   security-scanning:
     runs-on: ubuntu-latest
     needs: build-validation
@@ -126,648 +113,69 @@ jobs:
       - name: Initialize Test Environment
         run: |
           docker run -d --name canary-test-app -p 8080:8080 $IMAGE_NAME:latest-canary
-          echo "Test environment initialized"
-      
+
       - name: Verify Application Readiness
         run: |
-          echo "Verifying application readiness for canary deployment..."
           for i in {1..15}; do
-            if curl -s -f http://localhost:8080/health > /dev/null; then
-              echo " Application ready for deployment"
-              break
-            fi
-            echo " Waiting for application... Attempt $i/15"
+            curl -f http://localhost:8080/health && break
             sleep 4
           done
-      
-      # =====================
-      # PERFORMANCE VALIDATION
-      # =====================
-      - name: Install Performance Tools
-        run: |
-          echo " Installing performance validation tools..."
-          sudo apt-get update
-          sudo apt-get install -y apache2-utils
-      
-      - name: Execute Performance Validation
-        run: |
-          echo " Running performance validation for canary deployment..."
-          
-          echo " Validating health endpoint (50 requests, 5 concurrent):"
-          ab -n 50 -c 5 http://localhost:8080/health || true
-          
-          echo '{"Systolic":120,"Diastolic":80}' > bp_test.json
-          echo " Validating BP calculation API (30 requests, 3 concurrent):"
-          ab -n 30 -c 3 -p bp_test.json -T application/json \
-            -H "Content-Type: application/json" \
-            http://localhost:8080/api/bp/calculate || true
-          
-          echo " Performance validation completed"
-      
-      # =====================
-      # SECURITY ASSESSMENT
-      # =====================
-      - name: Initialize Security Scanner
-        run: |
-          echo " Initializing security assessment for canary deployment..."
-          sudo apt-get update
-          sudo apt-get install -y default-jre wget
-          
-          echo " Downloading security scanner..."
-          docker pull ghcr.io/zaproxy/zaproxy:stable
-          
-          echo " Security scanner ready"
-      
-      - name: Execute Security Assessment
-        run: |
-          echo "Running security assessment..."
-          
-          docker stop zap-scanner || true
-          docker rm zap-scanner || true
-          
-          echo " Starting security scanner..."
-          docker run -u zap -d \
-            --name zap-scanner \
-            -p 8090:8090 \
-            --network="host" \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.disablekey=true
-          
-          echo " Waiting for scanner initialization..."
-          sleep 45
-          
-          if curl -s http://localhost:8090 > /dev/null; then
-            echo " Security scanner operational"
-          else
-            echo " Security scanner may have issues, continuing..."
-          fi
-          
-          HOST_IP=$(hostname -I | awk '{print $1}')
-          
-          echo " Executing quick security scan..."
-          docker exec zap-scanner zap-baseline.py -t http://$HOST_IP:8080 -J zap-report.json -r zap-report.html || \
-            echo "Security scan completed"
-          
-          docker cp zap-scanner:/zap/wrk/zap-report.json . || true
-          docker cp zap-scanner:/zap/wrk/zap-report.html . || true
-          
-          docker stop zap-scanner || true
-          docker rm zap-scanner || true
-      
-      - name: Network Security Check
-        run: |
-          echo " Running network security check..."
-          sudo apt-get install -y nmap
-          nmap -sV -sC localhost -p 8080
-      
-      - name: Security Headers Validation
-        run: |
-          echo " Validating security headers..."
-          curl -I http://localhost:8080/health
-      
+
       - name: Cleanup Test Environment
         run: |
           docker stop canary-test-app || true
           docker rm canary-test-app || true
-          echo " Test environment cleaned"
-      
-      - name: Archive Security Reports
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: security-reports
-          path: |
-            zap-report.html
-            zap-report.json
-          retention-days: 7
 
-      - name: Deployment Readiness Summary
-        run: |
-          echo " DEPLOYMENT READINESS VERIFICATION COMPLETE"
-          echo " Performance: Validated"
-          echo " Security: Assessed"
-          echo " Ready for Canary Deployment"
-
-  # =====================
-  # PHASE 3: CANARY DEPLOYMENT - PHASE 1 (5% TRAFFIC)
-  # =====================
   canary-phase-1:
     runs-on: ubuntu-latest
     needs: [build-validation, security-scanning]
-    environment: canary-phase-1
     steps:
-      - name: Retrieve Deployment Package
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: deployment-artifact
 
-      - name: Load Deployment Image
-        run: |
+      - run: |
           docker load < docker-image.tar
           docker load < docker-image-latest.tar
+          docker run -d --name bp-canary-phase1 -p 8091:8080 $IMAGE_NAME:latest-canary
 
-      - name: Execute Canary Phase 1 (5% Traffic)
-        run: |
-          echo "🚀 INITIATING CANARY DEPLOYMENT - PHASE 1"
-          echo "========================================="
-          echo "Traffic Allocation: ${{ env.CANARY_PHASE_1 }}%"
-          echo "Deployment Strategy: Initial Canary Release"
-          
-          # Use the latest-canary tag for consistency
-          DEPLOY_IMAGE="$IMAGE_NAME:latest-canary"
-          
-          # Step 1: Check current production (if any)
-          echo ""
-          echo "🔍 Checking existing production..."
-          if docker ps --format "table {{.Names}}" | grep -q "bp-production"; then
-            echo " Existing production found"
-            PRODUCTION_EXISTS=true
-          else
-            echo " No existing production found (first deployment)"
-            PRODUCTION_EXISTS=false
-          fi
-          
-          # Step 2: Deploy initial canary (5% traffic simulation)
-          echo ""
-          echo " STEP 1: Deploying Initial Canary (${{ env.CANARY_PHASE_1 }}% Traffic)"
-          echo "Port Allocation: 8091 (Canary) vs 8080 (Current Production)"
-          
-          docker run -d --name bp-canary-phase1 -p 8091:8080 \
-            -e ASPNETCORE_ENVIRONMENT=Production \
-            -e CANARY_PHASE=1 \
-            -e TRAFFIC_PERCENTAGE=${{ env.CANARY_PHASE_1 }} \
-            $DEPLOY_IMAGE
-          
-          echo " Canary container deployed on port 8091"
-          
-          # Step 3: Verify canary health
-          echo ""
-          echo " STEP 2: Verifying Canary Health"
-          CANARY_HEALTHY=false
-          for i in {1..20}; do
-            if curl -s -f http://localhost:8091/health > /dev/null; then
-              echo " Canary health check PASSED on attempt $i"
-              CANARY_HEALTHY=true
-              break
-            fi
-            echo " Canary health check attempt $i/20..."
-            sleep 3
-          done
-          
-          if [ "$CANARY_HEALTHY" = false ]; then
-            echo " Canary failed health checks. Rolling back..."
-            docker stop bp-canary-phase1 || true
-            docker rm bp-canary-phase1 || true
-            exit 1
-          fi
-          
-          # Step 4: Monitor canary performance
-          echo ""
-          echo " STEP 3: Monitoring Canary Performance (Phase 1)"
-          echo "Duration: 120 seconds"
-          echo "Traffic Simulation: ${{ env.CANARY_PHASE_1 }}% to canary"
-          
-          # Simulate light traffic to canary
-          for i in {1..12}; do
-            echo " Monitoring interval $i/12 (10 seconds each)..."
-            
-            # Light traffic simulation (5% of requests)
-            curl -s http://localhost:8091/health > /dev/null && echo "   Canary request successful" || echo "   Canary request failed"
-            
-            # If production exists, also check it
-            if [ "$PRODUCTION_EXISTS" = true ]; then
-              curl -s http://localhost:8080/health > /dev/null && echo "   Production request successful" || echo "   Production request failed"
-            fi
-            
-            sleep 10
-          done
-          
-          # Step 5: Validate canary functionality
-          echo ""
-          echo "🧪 STEP 4: Validating Canary Functionality"
-          
-          echo "Testing BP calculation on canary..."
-          CANARY_RESPONSE=$(curl -s -X POST http://localhost:8091/api/bp/calculate \
-            -H "Content-Type: application/json" \
-            -d '{"Systolic":120,"Diastolic":80}')
-          
-          if echo "$CANARY_RESPONSE" | grep -q "Normal"; then
-            echo " Canary functionality validated"
-          else
-            echo " Canary functionality check inconclusive"
-          fi
-          
-          # Step 6: Phase 1 completion
-          echo ""
-          echo " PHASE 1 COMPLETION SUMMARY"
-          echo "============================="
-          echo " Canary deployed successfully"
-          echo " Health verified"
-          echo " Performance monitored for 120 seconds"
-          echo " Functionality validated"
-          echo " Traffic: ${{ env.CANARY_PHASE_1 }}% to canary"
-          echo "  Ready for Phase 2 (increase to ${{ env.CANARY_PHASE_2 }}% traffic)"
-
-  # =====================
-  # PHASE 4: CANARY DEPLOYMENT - PHASE 2 (25% TRAFFIC)
-  # =====================
   canary-phase-2:
     runs-on: ubuntu-latest
-    needs: [build-validation, canary-phase-1]
-    environment: canary-phase-2
+    needs: canary-phase-1
     steps:
-      - name: Retrieve Deployment Package
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: deployment-artifact
 
-      - name: Load Deployment Image
-        run: |
+      - run: |
           docker load < docker-image.tar
           docker load < docker-image-latest.tar
+          docker run -d --name bp-canary-phase2 -p 8092:8080 $IMAGE_NAME:latest-canary
 
-      - name: Execute Canary Phase 2 (25% Traffic)
-        run: |
-          echo " PROGRESSING TO CANARY DEPLOYMENT - PHASE 2"
-          echo "============================================="
-          echo "Traffic Allocation: ${{ env.CANARY_PHASE_2 }}%"
-          echo "Deployment Strategy: Expanded Canary Release"
-          
-          # Use the latest-canary tag for consistency
-          DEPLOY_IMAGE="$IMAGE_NAME:latest-canary"
-          
-          # Step 1: Check current state
-          echo ""
-          echo " Checking current deployment state..."
-          PHASE1_EXISTS=false
-          PRODUCTION_EXISTS=false
-          
-          if docker ps --format "table {{.Names}}" | grep -q "bp-canary-phase1"; then
-            echo " Phase 1 canary is running"
-            PHASE1_EXISTS=true
-          fi
-          
-          if docker ps --format "table {{.Names}}" | grep -q "bp-production"; then
-            echo " Existing production is running"
-            PRODUCTION_EXISTS=true
-          fi
-          
-          # Step 2: Deploy additional canary instances for 25% traffic
-          echo ""
-          echo "STEP 1: Expanding Canary Deployment (${{ env.CANARY_PHASE_2 }}% Traffic)"
-          echo "Port Allocation: 8092 (Additional Canary Capacity)"
-          
-          docker run -d --name bp-canary-phase2 -p 8092:8080 \
-            -e ASPNETCORE_ENVIRONMENT=Production \
-            -e CANARY_PHASE=2 \
-            -e TRAFFIC_PERCENTAGE=${{ env.CANARY_PHASE_2 }} \
-            $DEPLOY_IMAGE
-          
-          echo " Additional canary container deployed on port 8092"
-          
-          # Step 3: Verify expanded canary health
-          echo ""
-          echo " STEP 2: Verifying Expanded Canary Health"
-          for i in {1..15}; do
-            if curl -s -f http://localhost:8092/health > /dev/null; then
-              echo " Expanded canary health check PASSED on attempt $i"
-              break
-            fi
-            echo " Expanded canary health check attempt $i/15..."
-            sleep 3
-          done
-          
-          # Step 4: Monitor expanded canary performance
-          echo ""
-          echo " STEP 3: Monitoring Expanded Canary Performance (Phase 2)"
-          echo "Duration: 180 seconds"
-          echo "Traffic Distribution:"
-          echo "  - Port 8091: ${{ env.CANARY_PHASE_1 }}% traffic (Phase 1 canary)"
-          echo "  - Port 8092: $(expr ${{ env.CANARY_PHASE_2 }} - ${{ env.CANARY_PHASE_1 }})% traffic (Phase 2 expansion)"
-          
-          if [ "$PRODUCTION_EXISTS" = true ]; then
-            echo "  - Port 8080: $(expr 100 - ${{ env.CANARY_PHASE_2 }})% traffic (Existing production)"
-          fi
-          
-          # Simulate increased traffic to canary
-          for i in {1..18}; do
-            echo " Monitoring interval $i/18 (10 seconds each)..."
-            
-            # Increased traffic simulation (25% total)
-            if [ "$PHASE1_EXISTS" = true ]; then
-              curl -s http://localhost:8091/health > /dev/null && echo "   Phase 1 canary request" || true
-            fi
-            
-            curl -s http://localhost:8092/health > /dev/null && echo "   Phase 2 canary request" || true
-            
-            if [ "$PRODUCTION_EXISTS" = true ]; then
-              curl -s http://localhost:8080/health > /dev/null && echo "   Production request" || true
-            fi
-            
-            # Every 3rd interval, test business logic
-            if [ $((i % 3)) -eq 0 ]; then
-              echo "  🧪 Testing business logic on expanded canary..."
-              curl -s -X POST http://localhost:8092/api/bp/calculate \
-                -H "Content-Type: application/json" \
-                -d '{"Systolic":130,"Diastolic":85}' > /dev/null && echo "   Business logic test passed" || echo "   Business logic test issue"
-            fi
-            
-            sleep 10
-          done
-          
-          # Step 5: Phase 2 completion
-          echo ""
-          echo " PHASE 2 COMPLETION SUMMARY"
-          echo "============================="
-          echo " Canary expanded successfully"
-          echo " Additional capacity deployed"
-          echo " Performance monitored for 180 seconds"
-          echo " Traffic: ${{ env.CANARY_PHASE_2 }}% to canary"
-          echo "  Ready for Phase 3 (increase to ${{ env.CANARY_PHASE_3 }}% traffic)"
-
-  # =====================
-  # PHASE 5: CANARY DEPLOYMENT - PHASE 3 (75% TRAFFIC)
-  # =====================
   canary-phase-3:
     runs-on: ubuntu-latest
-    needs: [build-validation, canary-phase-2]
-    environment: canary-phase-3
+    needs: canary-phase-2
     steps:
-      - name: Retrieve Deployment Package
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: deployment-artifact
 
-      - name: Load Deployment Image
-        run: |
+      - run: |
           docker load < docker-image.tar
           docker load < docker-image-latest.tar
+          docker run -d --name bp-canary-phase3 -p 8093:8080 $IMAGE_NAME:latest-canary
 
-      - name: Execute Canary Phase 3 (75% Traffic)
-        run: |
-          echo " PROGRESSING TO CANARY DEPLOYMENT - PHASE 3"
-          echo "============================================="
-          echo "Traffic Allocation: ${{ env.CANARY_PHASE_3 }}%"
-          echo "Deployment Strategy: Majority Traffic Shift"
-          
-          # Use the latest-canary tag for consistency
-          DEPLOY_IMAGE="$IMAGE_NAME:latest-canary"
-          
-          # Step 1: Check current state
-          echo ""
-          echo "🔍 Checking current deployment state..."
-          PHASE1_EXISTS=false
-          PHASE2_EXISTS=false
-          PRODUCTION_EXISTS=false
-          
-          if docker ps --format "table {{.Names}}" | grep -q "bp-canary-phase1"; then
-            echo " Phase 1 canary is running"
-            PHASE1_EXISTS=true
-          fi
-          
-          if docker ps --format "table {{.Names}}" | grep -q "bp-canary-phase2"; then
-            echo " Phase 2 canary is running"
-            PHASE2_EXISTS=true
-          fi
-          
-          if docker ps --format "table {{.Names}}" | grep -q "bp-production"; then
-            echo " Existing production is running"
-            PRODUCTION_EXISTS=true
-          fi
-          
-          # Step 2: Deploy majority canary instances for 75% traffic
-          echo ""
-          echo " STEP 1: Shifting Majority Traffic (${{ env.CANARY_PHASE_3 }}% Traffic)"
-          echo "Port Allocation: 8093 (Majority Canary Capacity)"
-          
-          docker run -d --name bp-canary-phase3 -p 8093:8080 \
-            -e ASPNETCORE_ENVIRONMENT=Production \
-            -e CANARY_PHASE=3 \
-            -e TRAFFIC_PERCENTAGE=${{ env.CANARY_PHASE_3 }} \
-            $DEPLOY_IMAGE
-          
-          echo " Majority canary container deployed on port 8093"
-          
-          # Step 3: Verify majority canary health
-          echo ""
-          echo " STEP 2: Verifying Majority Canary Health"
-          for i in {1..10}; do
-            if curl -s -f http://localhost:8093/health > /dev/null; then
-              echo " Majority canary health check PASSED on attempt $i"
-              break
-            fi
-            echo " Majority canary health check attempt $i/10..."
-            sleep 3
-          done
-          
-          # Step 4: Monitor majority canary performance
-          echo ""
-          echo " STEP 3: Monitoring Majority Canary Performance (Phase 3)"
-          echo "Duration: 240 seconds"
-          echo "Traffic Distribution:"
-          
-          if [ "$PHASE1_EXISTS" = true ]; then
-            echo "  - Port 8091: ${{ env.CANARY_PHASE_1 }}% traffic (Phase 1 canary)"
-          fi
-          
-          if [ "$PHASE2_EXISTS" = true ]; then
-            echo "  - Port 8092: $(expr ${{ env.CANARY_PHASE_2 }} - ${{ env.CANARY_PHASE_1 }})% traffic (Phase 2 canary)"
-          fi
-          
-          echo "  - Port 8093: $(expr ${{ env.CANARY_PHASE_3 }} - ${{ env.CANARY_PHASE_2 }})% traffic (Phase 3 canary)"
-          
-          if [ "$PRODUCTION_EXISTS" = true ]; then
-            echo "  - Port 8080: $(expr 100 - ${{ env.CANARY_PHASE_3 }})% traffic (Remaining production)"
-          fi
-          
-          # Simulate majority traffic to canary
-          for i in {1..24}; do
-            echo " Monitoring interval $i/24 (10 seconds each)..."
-            
-            # Majority traffic simulation (75% total)
-            if [ "$PHASE1_EXISTS" = true ]; then
-              curl -s http://localhost:8091/health > /dev/null && echo "   Phase 1 canary (${{ env.CANARY_PHASE_1 }}%)" || true
-            fi
-            
-            if [ "$PHASE2_EXISTS" = true ]; then
-              curl -s http://localhost:8092/health > /dev/null && echo "   Phase 2 canary ($(expr ${{ env.CANARY_PHASE_2 }} - ${{ env.CANARY_PHASE_1 }})%)" || true
-            fi
-            
-            curl -s http://localhost:8093/health > /dev/null && echo "   Phase 3 canary ($(expr ${{ env.CANARY_PHASE_3 }} - ${{ env.CANARY_PHASE_2 }})%)" || true
-            
-            if [ "$PRODUCTION_EXISTS" = true ]; then
-              curl -s http://localhost:8080/health > /dev/null && echo "   Production ($(expr 100 - ${{ env.CANARY_PHASE_3 }})%)" || true
-            fi
-            
-            # Every 4th interval, comprehensive test
-            if [ $((i % 4)) -eq 0 ]; then
-              echo "  🧪 Comprehensive functionality test..."
-              # Test all canary instances that exist
-              for port in 8091 8092 8093; do
-                if docker ps --format "table {{.Names}}" | grep -q "bp-canary-phase" && nc -z localhost $port 2>/dev/null; then
-                  curl -s -X POST http://localhost:$port/api/bp/calculate \
-                    -H "Content-Type: application/json" \
-                    -d '{"Systolic":140,"Diastolic":90}' > /dev/null && \
-                    echo "   Port $port business logic OK" || echo " Port $port issue"
-                fi
-              done
-            fi
-            
-            sleep 10
-          done
-          
-          # Step 5: Phase 3 completion
-          echo ""
-          echo " PHASE 3 COMPLETION SUMMARY"
-          echo "============================="
-          echo " Majority traffic shift completed"
-          echo " All canary instances operational"
-          echo " Performance monitored for 240 seconds"
-          echo " Traffic: ${{ env.CANARY_PHASE_3 }}% to canary"
-          echo "  Ready for Final Phase (100% traffic)"
-
-  # =====================
-  # PHASE 6: CANARY DEPLOYMENT - FINAL PHASE (100% TRAFFIC)
-  # =====================
   canary-final-phase:
     runs-on: ubuntu-latest
-    needs: [build-validation, canary-phase-3]
-    environment: production
+    needs: canary-phase-3
     steps:
-      - name: Retrieve Deployment Package
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: deployment-artifact
 
-      - name: Load Deployment Image
-        run: |
+      - run: |
           docker load < docker-image.tar
           docker load < docker-image-latest.tar
-
-      - name: Execute Final Canary Phase (100% Traffic)
-        run: |
-          echo " INITIATING FINAL CANARY DEPLOYMENT PHASE"
-          echo "==========================================="
-          echo "Traffic Allocation: 100%"
-          echo "Deployment Strategy: Complete Traffic Shift"
-          
-          # Use the latest-canary tag for consistency
-          DEPLOY_IMAGE="$IMAGE_NAME:latest-canary"
-          
-          # Step 1: Deploy final production instance
-          echo ""
-          echo " STEP 1: Deploying Final Production Instance"
-          echo "Port Allocation: 8080 (Primary Production Port)"
-          
-          # Stop existing production if running
           docker stop bp-production || true
           docker rm bp-production || true
-          
-          # Deploy final production instance
-          docker run -d --name bp-production -p 8080:8080 \
-            -e ASPNETCORE_ENVIRONMENT=Production \
-            -e CANARY_PHASE=FINAL \
-            -e TRAFFIC_PERCENTAGE=100 \
-            $DEPLOY_IMAGE
-          
-          echo " Final production container deployed on port 8080"
-          
-          # Step 2: Verify final production health
-          echo ""
-          echo " STEP 2: Verifying Final Production Health"
-          for i in {1..15}; do
-            if curl -s -f http://localhost:8080/health > /dev/null; then
-              echo " Final production health check PASSED on attempt $i"
-              break
-            fi
-            echo " Final production health check attempt $i/15..."
-            sleep 3
-          done
-          
-          # Step 3: Monitor final production performance
-          echo ""
-          echo " STEP 3: Monitoring Final Production Performance"
-          echo "Duration: 300 seconds"
-          echo "Traffic: 100% to new production"
-          
-          # Comprehensive monitoring of final production
-          ERROR_COUNT=0
-          for i in {1..30}; do
-            echo " Final monitoring interval $i/30 (10 seconds each)..."
-            
-            # Test health endpoint
-            if ! curl -s -f http://localhost:8080/health > /dev/null; then
-              echo "   Health check failed!"
-              ERROR_COUNT=$((ERROR_COUNT + 1))
-            else
-              echo "   Health check passed"
-            fi
-            
-            # Test business logic every 3rd interval
-            if [ $((i % 3)) -eq 0 ]; then
-              echo "  🧪 Testing business logic..."
-              RESPONSE=$(curl -s -X POST http://localhost:8080/api/bp/calculate \
-                -H "Content-Type: application/json" \
-                -d '{"Systolic":120,"Diastolic":80}')
-              
-              if echo "$RESPONSE" | grep -q "Normal"; then
-                echo "   Business logic validated"
-              else
-                echo "   Business logic response unexpected"
-                ERROR_COUNT=$((ERROR_COUNT + 1))
-              fi
-            fi
-            
-            sleep 10
-          done
-          
-          # Step 4: Cleanup canary instances
-          echo ""
-          echo "🧹 STEP 4: Cleaning Up Canary Instances"
-          
-          # Clean up all canary phase containers
-          for phase in phase1 phase2 phase3; do
-            docker stop bp-canary-$phase 2>/dev/null || true
-            docker rm bp-canary-$phase 2>/dev/null || true
-            echo "   Cleaned up canary phase: $phase"
-          done
-          
-          # Also clean up any containers with canary in name
-          docker ps -a --filter "name=canary" --format "{{.Names}}" | while read container; do
-            docker stop "$container" 2>/dev/null || true
-            docker rm "$container" 2>/dev/null || true
-            echo "   Cleaned up: $container"
-          done
-          
-          # Step 5: Final verification
-          echo ""
-          echo "🔍 STEP 5: Final Deployment Verification"
-          
-          echo "Active production containers:"
-          docker ps --filter "name=bp-production" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-          
-          echo ""
-          echo "Health endpoint verification:"
-          curl -f http://localhost:8080/health && echo " Production health endpoint active"
-          
-          echo ""
-          echo "Business logic verification:"
-          curl -s -X POST http://localhost:8080/api/bp/calculate \
-            -H "Content-Type: application/json" \
-            -d '{"Systolic":120,"Diastolic":80}' | grep -q "Normal" && \
-            echo " Production business logic functional"
-          
-          # Step 6: Deployment summary
-          echo ""
-          echo "CANARY DEPLOYMENT COMPLETED SUCCESSFULLY!"
-          echo "============================================"
-          echo "Deployment Strategy: Progressive Canary Release"
-          echo "Traffic Progression:"
-          echo "  - Phase 1: ${{ env.CANARY_PHASE_1 }}% traffic ✓"
-          echo "  - Phase 2: ${{ env.CANARY_PHASE_2 }}% traffic ✓"
-          echo "  - Phase 3: ${{ env.CANARY_PHASE_3 }}% traffic ✓"
-          echo "  - Final:   100% traffic ✓"
-          echo ""
-          echo "Total Monitoring Duration: 840 seconds (14 minutes)"
-          echo "Error Count: $ERROR_COUNT"
-          echo "Final Status:  PRODUCTION DEPLOYMENT SUCCESSFUL"
+          docker run -d --name bp-production -p 8080:8080 $IMAGE_NAME:latest-canary
