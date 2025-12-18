@@ -1,4 +1,4 @@
-name: CD Pipeline - Azure Progressive Canary Deployment
+name: CD Pipeline - Azure Progressive Canary Deployment (Simplified)
 
 on:
   push:
@@ -17,12 +17,11 @@ on:
 
 env:
   IMAGE_NAME: bp-calculator
-  ACR_NAME: 'yourAcrName'           # CHANGE THIS
-  RESOURCE_GROUP: 'bp-calculator-rg' # CHANGE THIS
-  LOCATION: 'eastus'                # CHANGE THIS
-  CONTAINER_GROUP: 'bp-calculator-cg'
+  ACR_NAME: 'bpcalculator2024'           # Your actual ACR name
+  RESOURCE_GROUP: 'bp-calculator-rg'     # Your resource group
+  LOCATION: 'eastus'                     # Your region
   
-  # Canary Traffic Progression for App Gateway
+  # Canary Traffic Progression
   CANARY_PHASE_1: 5    # Initial canary traffic percentage
   CANARY_PHASE_2: 25   # Second phase traffic percentage
   CANARY_PHASE_3: 75   # Third phase traffic percentage
@@ -76,24 +75,27 @@ jobs:
       - name: Build and Push Docker Image to ACR
         id: build-image
         run: |
-          # Build image
+          # Build image with the new tag
           docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.docker-tag }} .
-          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest .
           
-          # Push to ACR
+          # Also tag as latest for consistency
+          docker tag ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.docker-tag }} \
+            ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+          
+          # Push both tags to ACR
           docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.docker-tag }}
           docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
           
-          # Set output
+          # Set output for use in later jobs
           echo "image-uri=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.docker-tag }}" >> $GITHUB_OUTPUT
 
   # =====================
-  # PHASE 2: AZURE INFRASTRUCTURE SETUP
+  # PHASE 2: AZURE DEPLOYMENT WITH SIMPLIFIED CANARY
   # =====================
-  azure-setup:
+  azure-canary-deployment:
     runs-on: ubuntu-latest
     needs: build-validation
-    environment: azure-deployment
+    environment: production
     steps:
       - name: Azure Login
         uses: azure/login@v1
@@ -102,232 +104,231 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Create Resource Group (if not exists)
+      - name: Check for Existing Production Container
+        id: check-existing
         run: |
-          az group create \
-            --name ${{ env.RESOURCE_GROUP }} \
-            --location ${{ env.LOCATION }} \
-            --tags "Environment=Canary" "Application=BP-Calculator"
+          # Check if production container already exists
+          if az container show --resource-group ${{ env.RESOURCE_GROUP }} --name bp-production 2>/dev/null; then
+            echo "EXISTING_PRODUCTION=true" >> $GITHUB_OUTPUT
+            PROD_IP=$(az container show --resource-group ${{ env.RESOURCE_GROUP }} --name bp-production --query "ipAddress.ip" -o tsv)
+            echo "EXISTING_IP=$PROD_IP" >> $GITHUB_OUTPUT
+          else
+            echo "EXISTING_PRODUCTION=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Create Azure Container Registry (if not exists)
+      # =====================
+      # CANARY PHASE 1: Deploy canary alongside existing production (5%)
+      # =====================
+      - name: Deploy Canary Phase 1 (5% Simulation)
+        id: deploy-canary-phase1
         run: |
-          az acr create \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name ${{ env.ACR_NAME }} \
-            --sku Basic \
-            --admin-enabled true
-
-      - name: Create Azure Container Instances for Production
-        id: create-production
-        run: |
-          # Create production container instance
+          echo "🚀 CANARY PHASE 1: Deploying canary version"
+          echo "Traffic Simulation: ${{ env.CANARY_PHASE_1 }}% to canary"
+          
+          # Deploy canary container instance
           az container create \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name bp-production \
+            --name bp-canary-phase1 \
             --image ${{ needs.build-validation.outputs.image-uri }} \
             --cpu 1 \
             --memory 1.5 \
             --ports 8080 \
-            --environment-variables ASPNETCORE_ENVIRONMENT=Production \
-            --dns-name-label bp-production-${{ github.run_id }} \
-            --restart-policy Always
-
-      - name: Create Canary Container Instances
-        run: |
-          # Create canary container instances (all phases)
-          for phase in 1 2 3; do
-            az container create \
-              --resource-group ${{ env.RESOURCE_GROUP }} \
-              --name bp-canary-phase$phase \
-              --image ${{ needs.build-validation.outputs.image-uri }} \
-              --cpu 1 \
-              --memory 1.5 \
-              --ports 8080 \
-              --environment-variables ASPNETCORE_ENVIRONMENT=Production CANARY_PHASE=$phase \
-              --dns-name-label bp-canary-phase$phase-${{ github.run_id }} \
-              --restart-policy Always
-          done
-
-  # =====================
-  # PHASE 3: SECURITY & PERFORMANCE SCANNING
-  # =====================
-  security-scanning:
-    runs-on: ubuntu-latest
-    needs: [build-validation, azure-setup]
-    steps:
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Get Container IP Addresses
-        id: get-ips
-        run: |
-          # Get production container IP
-          PROD_IP=$(az container show \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name bp-production \
-            --query "ipAddress.ip" -o tsv)
-          echo "production-ip=$PROD_IP" >> $GITHUB_OUTPUT
+            --dns-name-label bp-canary-phase1-${{ github.run_id }} \
+            --environment-variables ASPNETCORE_ENVIRONMENT=Production CANARY_PHASE=1 \
+            --restart-policy Always \
+            --location ${{ env.LOCATION }}
           
-          # Get canary container IP
+          # Get canary IP address
           CANARY_IP=$(az container show \
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --name bp-canary-phase1 \
             --query "ipAddress.ip" -o tsv)
-          echo "canary-ip=$CANARY_IP" >> $GITHUB_OUTPUT
+          echo "CANARY_IP=$CANARY_IP" >> $GITHUB_OUTPUT
+          echo "Canary deployed at: $CANARY_IP:8080"
 
-      - name: Verify Application Readiness
+      - name: Verify Canary Phase 1 Health
         run: |
-          echo "Verifying application readiness..."
+          echo "Verifying canary health..."
+          CANARY_IP=${{ steps.deploy-canary-phase1.outputs.CANARY_IP }}
           
-          # Check production
           for i in {1..15}; do
-            if curl -s -f http://${{ steps.get-ips.outputs.production-ip }}:8080/health > /dev/null; then
-              echo "✅ Production ready"
-              break
-            fi
-            echo "⏳ Waiting for production... Attempt $i/15"
-            sleep 4
-          done
-          
-          # Check canary
-          for i in {1..15}; do
-            if curl -s -f http://${{ steps.get-ips.outputs.canary-ip }}:8080/health > /dev/null; then
-              echo "✅ Canary ready"
+            if curl -s -f http://$CANARY_IP:8080/health > /dev/null; then
+              echo "✅ Canary Phase 1 is healthy!"
               break
             fi
             echo "⏳ Waiting for canary... Attempt $i/15"
             sleep 4
           done
-
-      - name: Execute Performance Validation
-        run: |
-          echo "Running performance validation..."
-          sudo apt-get update
-          sudo apt-get install -y apache2-utils
           
-          echo "Validating health endpoint (50 requests, 5 concurrent):"
-          ab -n 50 -c 5 http://${{ steps.get-ips.outputs.production-ip }}:8080/health || true
-          
-          echo '{"Systolic":120,"Diastolic":80}' > bp_test.json
-          echo "Validating BP calculation API (30 requests, 3 concurrent):"
-          ab -n 30 -c 3 -p bp_test.json -T application/json \
+          # Test business logic
+          echo "Testing canary functionality..."
+          curl -X POST http://$CANARY_IP:8080/api/bp/calculate \
             -H "Content-Type: application/json" \
-            http://${{ steps.get-ips.outputs.production-ip }}:8080/api/bp/calculate || true
+            -d '{"Systolic":120,"Diastolic":80}' && echo "✅ Canary functionality verified"
 
-  # =====================
-  # PHASE 4: CANARY DEPLOYMENT WITH TRAFFIC SHIFTING
-  # =====================
-  canary-deployment:
-    runs-on: ubuntu-latest
-    needs: [build-validation, security-scanning]
-    environment: canary-production
-    steps:
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Create Application Gateway for Traffic Routing
-        id: create-app-gateway
+      - name: Monitor Canary Phase 1 (5% Traffic Simulation)
         run: |
-          # Create virtual network
-          az network vnet create \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name bp-vnet \
-            --address-prefix 10.0.0.0/16 \
-            --subnet-name gateway-subnet \
-            --subnet-prefix 10.0.1.0/24
+          echo "📊 Monitoring Canary Phase 1 (${{ env.CANARY_PHASE_1 }}% traffic simulation)"
+          echo "Duration: 120 seconds"
           
-          # Create public IP
-          az network public-ip create \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name gateway-pip \
-            --sku Standard \
-            --allocation-method Static
+          CANARY_IP=${{ steps.deploy-canary-phase1.outputs.CANARY_IP }}
           
-          # Create application gateway
-          az network application-gateway create \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name bp-app-gateway \
-            --sku WAF_v2 \
-            --capacity 2 \
-            --vnet-name bp-vnet \
-            --subnet gateway-subnet \
-            --public-ip-address gateway-pip \
-            --servers "${{ steps.get-ips.outputs.production-ip }}" "${{ steps.get-ips.outputs.canary-ip }}"
-          
-          # Get gateway public IP
-          GATEWAY_IP=$(az network public-ip show \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name gateway-pip \
-            --query "ipAddress" -o tsv)
-          echo "gateway-ip=$GATEWAY_IP" >> $GITHUB_OUTPUT
+          # Simulate 5% of traffic going to canary (1 in 20 requests)
+          for i in {1..12}; do
+            echo "Interval $i/12 (10 seconds each)..."
+            
+            # Simulate traffic pattern: 5% to canary, 95% to production (if exists)
+            for j in {1..19}; do
+              if [ "${{ steps.check-existing.outputs.EXISTING_PRODUCTION }}" = "true" ]; then
+                curl -s http://${{ steps.check-existing.outputs.EXISTING_IP }}:8080/health > /dev/null || true
+              fi
+            done
+            
+            # 5% request to canary
+            curl -s http://$CANARY_IP:8080/health > /dev/null && echo "  Canary request successful" || true
+            
+            sleep 10
+          done
 
-      - name: Phase 1 - 5% Traffic to Canary
+      # =====================
+      # CANARY PHASE 2: Increase to 25% traffic
+      # =====================
+      - name: Deploy Canary Phase 2 (25% Simulation)
+        id: deploy-canary-phase2
         run: |
-          echo "🚀 PHASE 1: 5% Traffic to Canary"
-          echo "================================="
+          echo "📈 CANARY PHASE 2: Scaling canary presence"
+          echo "Traffic Simulation: ${{ env.CANARY_PHASE_2 }}% to canary"
           
-          # Configure traffic splitting (95% prod, 5% canary)
-          az network application-gateway probe create \
+          # Deploy second canary instance for increased capacity
+          az container create \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --gateway-name bp-app-gateway \
-            --name canary-probe \
-            --protocol Http \
-            --host ${{ steps.get-ips.outputs.canary-ip }} \
-            --path /health \
-            --interval 30 \
-            --timeout 30 \
-            --threshold 3
+            --name bp-canary-phase2 \
+            --image ${{ needs.build-validation.outputs.image-uri }} \
+            --cpu 1 \
+            --memory 1.5 \
+            --ports 8080 \
+            --dns-name-label bp-canary-phase2-${{ github.run_id }} \
+            --environment-variables ASPNETCORE_ENVIRONMENT=Production CANARY_PHASE=2 \
+            --restart-policy Always \
+            --location ${{ env.LOCATION }}
           
-          echo "Traffic configured: 95% Production, 5% Canary"
-          echo "Monitoring for 120 seconds..."
-          sleep 120
+          # Get second canary IP
+          CANARY2_IP=$(az container show \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name bp-canary-phase2 \
+            --query "ipAddress.ip" -o tsv)
+          echo "CANARY2_IP=$CANARY2_IP" >> $GITHUB_OUTPUT
 
-      - name: Phase 2 - 25% Traffic to Canary
+      - name: Monitor Canary Phase 2 (25% Traffic Simulation)
         run: |
-          echo "📈 PHASE 2: Increasing to 25% Traffic to Canary"
-          echo "================================================"
+          echo "📊 Monitoring Canary Phase 2 (${{ env.CANARY_PHASE_2 }}% traffic simulation)"
+          echo "Duration: 180 seconds"
           
-          # Update traffic weights (75% prod, 25% canary)
-          # This would require updating the backend pool weights
-          # For simplicity, we'll simulate the wait period
+          CANARY1_IP=${{ steps.deploy-canary-phase1.outputs.CANARY_IP }}
+          CANARY2_IP=${{ steps.deploy-canary-phase2.outputs.CANARY2_IP }}
           
-          echo "Traffic increased: 75% Production, 25% Canary"
-          echo "Monitoring for 180 seconds..."
-          sleep 180
-          
-          # Test both endpoints
-          curl -f http://${{ steps.get-ips.outputs.production-ip }}:8080/health && echo "✅ Production healthy"
-          curl -f http://${{ steps.get-ips.outputs.canary-ip }}:8080/health && echo "✅ Canary healthy"
+          # Simulate 25% traffic to canary instances
+          for i in {1..18}; do
+            echo "Interval $i/18 (10 seconds each)..."
+            
+            # Traffic pattern: 25% to canaries (split between two instances), 75% to production
+            for j in {1..3}; do
+              if [ "${{ steps.check-existing.outputs.EXISTING_PRODUCTION }}" = "true" ]; then
+                curl -s http://${{ steps.check-existing.outputs.EXISTING_IP }}:8080/health > /dev/null || true
+              fi
+            done
+            
+            # 25% to canaries
+            curl -s http://$CANARY1_IP:8080/health > /dev/null || true
+            curl -s http://$CANARY2_IP:8080/health > /dev/null || true
+            
+            # Test business logic every 3rd interval
+            if [ $((i % 3)) -eq 0 ]; then
+              echo "  🧪 Testing canary functionality..."
+              curl -s -X POST http://$CANARY1_IP:8080/api/bp/calculate \
+                -H "Content-Type: application/json" \
+                -d '{"Systolic":130,"Diastolic":85}' > /dev/null && echo "    Canary 1 OK" || true
+            fi
+            
+            sleep 10
+          done
 
-      - name: Phase 3 - 75% Traffic to Canary
+      # =====================
+      # CANARY PHASE 3: Increase to 75% traffic
+      # =====================
+      - name: Deploy Canary Phase 3 (75% Simulation)
+        id: deploy-canary-phase3
         run: |
-          echo "🔥 PHASE 3: Shifting to 75% Traffic to Canary"
-          echo "=============================================="
+          echo "🔥 CANARY PHASE 3: Majority traffic shift"
+          echo "Traffic Simulation: ${{ env.CANARY_PHASE_3 }}% to canary"
           
-          echo "Traffic shifted: 25% Production, 75% Canary"
-          echo "Monitoring for 240 seconds..."
-          sleep 240
+          # Deploy third canary instance
+          az container create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name bp-canary-phase3 \
+            --image ${{ needs.build-validation.outputs.image-uri }} \
+            --cpu 1 \
+            --memory 1.5 \
+            --ports 8080 \
+            --dns-name-label bp-canary-phase3-${{ github.run_id }} \
+            --environment-variables ASPNETCORE_ENVIRONMENT=Production CANARY_PHASE=3 \
+            --restart-policy Always \
+            --location ${{ env.LOCATION }}
           
-          # Validate functionality
-          echo "🧪 Validating canary functionality..."
-          curl -X POST http://${{ steps.get-ips.outputs.canary-ip }}:8080/api/bp/calculate \
-            -H "Content-Type: application/json" \
-            -d '{"Systolic":120,"Diastolic":80}'
+          # Get third canary IP
+          CANARY3_IP=$(az container show \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name bp-canary-phase3 \
+            --query "ipAddress.ip" -o tsv)
+          echo "CANARY3_IP=$CANARY3_IP" >> $GITHUB_OUTPUT
 
-      - name: Final Phase - 100% Traffic to Canary
+      - name: Monitor Canary Phase 3 (75% Traffic Simulation)
         run: |
-          echo "🎯 FINAL PHASE: 100% Traffic to New Version"
-          echo "============================================"
+          echo "📊 Monitoring Canary Phase 3 (${{ env.CANARY_PHASE_3 }}% traffic simulation)"
+          echo "Duration: 240 seconds"
           
-          # Update production to new version
+          CANARY1_IP=${{ steps.deploy-canary-phase1.outputs.CANARY_IP }}
+          CANARY2_IP=${{ steps.deploy-canary-phase2.outputs.CANARY2_IP }}
+          CANARY3_IP=${{ steps.deploy-canary-phase3.outputs.CANARY3_IP }}
+          
+          # Simulate 75% traffic to canary instances
+          for i in {1..24}; do
+            echo "Interval $i/24 (10 seconds each)..."
+            
+            # Traffic pattern: 75% to canaries, 25% to production
+            if [ "${{ steps.check-existing.outputs.EXISTING_PRODUCTION }}" = "true" ]; then
+              curl -s http://${{ steps.check-existing.outputs.EXISTING_IP }}:8080/health > /dev/null || true
+            fi
+            
+            # 75% to canaries (3 requests to canary for every 1 to production)
+            curl -s http://$CANARY1_IP:8080/health > /dev/null || true
+            curl -s http://$CANARY2_IP:8080/health > /dev/null || true
+            curl -s http://$CANARY3_IP:8080/health > /dev/null || true
+            
+            # Comprehensive test every 4th interval
+            if [ $((i % 4)) -eq 0 ]; then
+              echo "  🧪 Comprehensive functionality test..."
+              for canary_ip in $CANARY1_IP $CANARY2_IP $CANARY3_IP; do
+                curl -s -X POST http://$canary_ip:8080/api/bp/calculate \
+                  -H "Content-Type: application/json" \
+                  -d '{"Systolic":140,"Diastolic":90}' > /dev/null && \
+                  echo "    Canary at $canary_ip: OK" || true
+              done
+            fi
+            
+            sleep 10
+          done
+
+      # =====================
+      # FINAL PHASE: Replace production with new version
+      # =====================
+      - name: Deploy Final Production Version
+        id: deploy-final-production
+        run: |
+          echo "🎯 FINAL PHASE: Deploying new production version"
+          echo "Traffic: 100% to new version"
+          
+          # Deploy new production container
           az container create \
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --name bp-production-new \
@@ -335,79 +336,81 @@ jobs:
             --cpu 1 \
             --memory 1.5 \
             --ports 8080 \
+            --dns-name-label bp-production-${{ github.run_id }} \
             --environment-variables ASPNETCORE_ENVIRONMENT=Production \
-            --dns-name-label bp-production-new-${{ github.run_id }} \
-            --restart-policy Always
+            --restart-policy Always \
+            --location ${{ env.LOCATION }}
           
-          # Wait for new production to be ready
-          sleep 30
-          
-          # Switch all traffic to new production
-          echo "✅ All traffic now directed to new version"
-          echo "Deployment complete!"
-
-      - name: Cleanup Old Containers
-        if: always()
-        run: |
-          echo "🧹 Cleaning up old containers..."
-          
-          # Delete old production container
-          az container delete \
+          # Get new production IP
+          NEW_PROD_IP=$(az container show \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name bp-production \
-            --yes || true
+            --name bp-production-new \
+            --query "ipAddress.ip" -o tsv)
+          echo "NEW_PROD_IP=$NEW_PROD_IP" >> $GITHUB_OUTPUT
           
-          # Delete canary containers
-          for phase in 1 2 3; do
-            az container delete \
-              --resource-group ${{ env.RESOURCE_GROUP }} \
-              --name bp-canary-phase$phase \
-              --yes || true
+          # Verify new production is healthy
+          echo "Verifying new production health..."
+          for i in {1..10}; do
+            if curl -s -f http://$NEW_PROD_IP:8080/health > /dev/null; then
+              echo "✅ New production is healthy!"
+              break
+            fi
+            echo "⏳ Waiting for new production... Attempt $i/10"
+            sleep 3
           done
 
-  # =====================
-  # PHASE 5: MONITORING AND ALERTS
-  # =====================
-  monitoring-setup:
-    runs-on: ubuntu-latest
-    needs: canary-deployment
-    steps:
-      - name: Azure Login
-        uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Create Application Insights
+      - name: Cleanup Old Resources
+        if: always()
         run: |
-          az monitor app-insights component create \
-            --app bp-calculator-insights \
-            --location ${{ env.LOCATION }} \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --application-type web
-
-      - name: Create Alert Rules
-        run: |
-          # Create alert for high error rate
-          az monitor metrics alert create \
-            --name "High-Error-Rate" \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --scopes $(az monitor app-insights component show \
-              --app bp-calculator-insights \
+          echo "🧹 Cleaning up old resources..."
+          
+          # Delete old production container if it exists
+          if [ "${{ steps.check-existing.outputs.EXISTING_PRODUCTION }}" = "true" ]; then
+            echo "Deleting old production container..."
+            az container delete \
               --resource-group ${{ env.RESOURCE_GROUP }} \
-              --query id -o tsv) \
-            --condition "avg requests/failed > 5" \
-            --description "Alert when error rate exceeds 5%" \
-            --window-size 5m \
-            --evaluation-frequency 1m
+              --name bp-production \
+              --yes || true
+          fi
+          
+          # Delete all canary containers
+          echo "Deleting canary containers..."
+          for container in bp-canary-phase1 bp-canary-phase2 bp-canary-phase3; do
+            az container delete \
+              --resource-group ${{ env.RESOURCE_GROUP }} \
+              --name $container \
+              --yes || true
+            echo "  Deleted: $container"
+          done
+          
+          # Rename new production to standard name
+          echo "Renaming new production to 'bp-production'..."
+          az container delete \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name bp-production-new \
+            --yes || true
+          
+          # Recreate with standard name (ACI doesn't support rename, so recreate)
+          az container create \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name bp-production \
+            --image ${{ needs.build-validation.outputs.image-uri }} \
+            --cpu 1 \
+            --memory 1.5 \
+            --ports 8080 \
+            --dns-name-label bp-production-final-${{ github.run_id }} \
+            --environment-variables ASPNETCORE_ENVIRONMENT=Production \
+            --restart-policy Always \
+            --location ${{ env.LOCATION }}
+          
+          echo "✅ Cleanup complete!"
 
   # =====================
   # DEPLOYMENT SUMMARY
   # =====================
   deployment-summary:
     runs-on: ubuntu-latest
-    needs: [canary-deployment, monitoring-setup]
+    needs: azure-canary-deployment
     if: always()
     steps:
       - name: Azure Login
@@ -419,30 +422,53 @@ jobs:
 
       - name: Generate Deployment Report
         run: |
-          echo "# 🚀 Azure Canary Deployment Complete"
-          echo "## Deployment Details"
+          echo "# 🚀 Azure Canary Deployment Complete!"
+          echo "## 📋 Deployment Details"
           echo "- **Application**: BP Calculator"
           echo "- **Resource Group**: ${{ env.RESOURCE_GROUP }}"
           echo "- **Region**: ${{ env.LOCATION }}"
-          echo "- **Deployment Strategy**: Progressive Canary (5% → 25% → 75% → 100%)"
-          echo "- **Status**: SUCCESS"
+          echo "- **Deployment Strategy**: Progressive Canary Release"
+          echo "- **Traffic Progression**: ${{ env.CANARY_PHASE_1 }}% → ${{ env.CANARY_PHASE_2 }}% → ${{ env.CANARY_PHASE_3 }}% → 100%"
+          echo "- **Total Monitoring Time**: 540 seconds (9 minutes)"
           echo ""
-          echo "## Azure Resources Created"
-          echo "1. Azure Container Registry (ACR)"
-          echo "2. Azure Container Instances (ACI)"
-          echo "3. Application Gateway for traffic routing"
-          echo "4. Application Insights for monitoring"
-          echo ""
-          echo "## Next Steps"
-          echo "1. Configure custom domain for Application Gateway"
-          echo "2. Set up SSL/TLS certificates"
-          echo "3. Configure auto-scaling rules"
-          echo "4. Set up backup and disaster recovery"
+          echo "## ✅ Azure Resources Status"
           
-          # Get resource information
-          echo ""
-          echo "### Resource URLs"
+          # List all containers in the resource group
+          echo "Active Containers:"
           az container list \
             --resource-group ${{ env.RESOURCE_GROUP }} \
-            --query "[].{Name:name, State:provisioningState, IP:ipAddress.ip, FQDN:ipAddress.fqdn}" \
+            --query "[].{Name:name, Status:provisioningState, IP:ipAddress.ip, Image:image}" \
             -o table
+          
+          echo ""
+          echo "## 🔗 Access Information"
+          PROD_INFO=$(az container show \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name bp-production \
+            --query "{IP:ipAddress.ip, FQDN:ipAddress.fqdn}" -o json)
+          
+          PROD_IP=$(echo $PROD_INFO | jq -r '.IP')
+          PROD_FQDN=$(echo $PROD_INFO | jq -r '.FQDN')
+          
+          echo "- **Production IP**: $PROD_IP"
+          echo "- **Production FQDN**: $PROD_FQDN"
+          echo "- **Health Check**: http://$PROD_IP:8080/health"
+          echo "- **API Endpoint**: http://$PROD_IP:8080/api/bp/calculate"
+          echo ""
+          echo "## 🎯 Test Your Deployment"
+          echo "Run these commands to verify:"
+          echo '```bash'
+          echo "# Health check"
+          echo "curl http://$PROD_IP:8080/health"
+          echo ""
+          echo "# Test BP calculation"
+          echo 'curl -X POST http://'$PROD_IP':8080/api/bp/calculate \'
+          echo '  -H "Content-Type: application/json" \'
+          echo '  -d '\''{"Systolic":120,"Diastolic":80}'\'''
+          echo '```'
+          echo ""
+          echo "## 💡 Next Steps"
+          echo "1. Configure custom domain (if needed)"
+          echo "2. Set up Azure Monitor alerts"
+          echo "3. Configure auto-scaling based on traffic"
+          echo "4. Set up backup policies"
