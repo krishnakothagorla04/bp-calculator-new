@@ -124,7 +124,7 @@ jobs:
         run: |
           echo "🚀 CANARY PHASE 1: Deploying canary version"
           echo "Traffic Simulation: ${{ env.CANARY_PHASE_1 }}% to canary"
-          
+      
           # Deploy canary container instance
           az container create \
             --resource-group ${{ env.RESOURCE_GROUP }} \
@@ -136,7 +136,9 @@ jobs:
             --dns-name-label bp-canary-phase1-${{ github.run_id }} \
             --environment-variables ASPNETCORE_ENVIRONMENT=Production CANARY_PHASE=1 \
             --restart-policy Always \
-            --location ${{ env.LOCATION }}
+            --location ${{ env.LOCATION }} \
+            --registry-username ${{ secrets.ACR_USERNAME }} \
+            --registry-password ${{ secrets.ACR_PASSWORD }}
           
           # Get canary IP address
           CANARY_IP=$(az container show \
